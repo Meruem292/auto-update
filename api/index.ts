@@ -67,8 +67,39 @@ async function triggerCommit() {
     const timestamp = new Date().toISOString();
     const contentToPush = Buffer.from(`Automated update triggered at: ${timestamp}`).toString("base64");
 
-    let fileSha: string | undefined;
+    // 1. Verify Repository and Branch first for better error messages
+    try {
+      const { data: repoData } = await octokit.rest.repos.get({
+        owner: config.repoOwner,
+        repo: config.repoName,
+      });
 
+      // Verification of branch
+      try {
+        await octokit.rest.repos.getBranch({
+          owner: config.repoOwner,
+          repo: config.repoName,
+          branch: config.branch,
+        });
+      } catch (branchError: any) {
+        if (branchError.status === 404) {
+          throw new Error(`Branch "${config.branch}" not found in repository "${config.repoOwner}/${config.repoName}". Please check if your default branch is "master" or "main".`);
+        }
+        throw branchError;
+      }
+
+    } catch (repoError: any) {
+      if (repoError.status === 404) {
+        throw new Error(`Repository "${config.repoOwner}/${config.repoName}" not found. Check your GITHUB_REPO_OWNER and GITHUB_REPO_NAME environment variables.`);
+      }
+      if (repoError.status === 401 || repoError.status === 403) {
+        throw new Error(`Permission denied. Check if your GITHUB_TOKEN is valid and has "repo" scope.`);
+      }
+      throw repoError;
+    }
+
+    // 2. Get the current file's SHA if it exists
+    let fileSha: string | undefined;
     try {
       const response = await octokit.rest.repos.getContent({
         owner: config.repoOwner,
@@ -81,8 +112,10 @@ async function triggerCommit() {
       }
     } catch (error: any) {
       if (error.status !== 404) throw error;
+      // 404 just means file doesn't exist yet, which is fine
     }
 
+    // 3. Create or update the file
     await octokit.rest.repos.createOrUpdateFileContents({
       owner: config.repoOwner,
       repo: config.repoName,
