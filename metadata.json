@@ -1,0 +1,6 @@
+{
+  "name": "Cron Committer",
+  "description": "An automated serverless-ready cron scheduler that pushes regular commits to a GitHub repository to keep automation pipelines or activity active.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
