@@ -1,71 +1,23 @@
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { Octokit } from "octokit";
-import fs from "fs/promises";
-import path from "path";
-import cron from "node-cron";
 
 const app = express();
 app.use(express.json());
 
 const router = express.Router();
-const CONFIG_FILE = path.join(process.cwd(), "cron-config.json");
 
 // In-memory log for serverless instances (resets after cold reboots)
 let lastRunLog = "Never run";
-let currentCronTask: any = null;
 
-interface AppConfig {
-  githubToken: string;
-  repoOwner: string;
-  repoName: string;
-  filePath: string;
-  branch: string;
-  cronExpression: string;
-  isActive: boolean;
-}
-
-const defaultConfig: AppConfig = {
+const getConfig = () => ({
   githubToken: process.env.GITHUB_TOKEN || "",
   repoOwner: process.env.GITHUB_REPO_OWNER || "",
   repoName: process.env.GITHUB_REPO_NAME || "",
   filePath: process.env.GITHUB_FILE_PATH || "automated-update.txt",
   branch: process.env.GITHUB_BRANCH || "main",
-  cronExpression: "0 0 * * *",
-  isActive: false,
-};
-
-let appConfig: AppConfig = { ...defaultConfig };
-
-async function loadConfig() {
-  try {
-    const data = await fs.readFile(CONFIG_FILE, "utf-8");
-    appConfig = { ...defaultConfig, ...JSON.parse(data) };
-  } catch (error) {
-    appConfig = { ...defaultConfig };
-  }
-}
-
-async function saveConfig(newConfig: AppConfig) {
-  appConfig = newConfig;
-  await fs.writeFile(CONFIG_FILE, JSON.stringify(appConfig, null, 2), "utf-8");
-  setupLocalCron();
-}
-
-function setupLocalCron() {
-  if (currentCronTask) {
-    currentCronTask.stop();
-    currentCronTask = null;
-  }
-
-  if (appConfig.isActive && appConfig.cronExpression && cron.validate(appConfig.cronExpression)) {
-    console.log(`Setting up local cron: ${appConfig.cronExpression}`);
-    currentCronTask = cron.schedule(appConfig.cronExpression, async () => {
-      console.log("Local cron executing...");
-      await triggerCommit();
-    });
-  }
-}
+  commitCount: parseInt(process.env.GITHUB_COMMIT_COUNT || "1", 10),
+});
 
 const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization;
@@ -98,64 +50,90 @@ router.post("/login", (req: Request, res: Response) => {
 });
 
 router.get("/config", requireAdmin, (req: Request, res: Response) => {
+  const conf = getConfig();
   res.json({
-    ...appConfig,
-    githubToken: appConfig.githubToken ? "••••••••••••" : "", // mask it
+    ...conf,
+    githubToken: conf.githubToken ? "•••••••••••• [Hidden in ENV]" : "", // mask it
   });
 });
 
-router.post("/config", requireAdmin, async (req: Request, res: Response) => {
-  const newConfig = req.body;
-  if (newConfig.githubToken === "••••••••••••") {
-    newConfig.githubToken = appConfig.githubToken;
-  }
-  await saveConfig(newConfig);
-  res.json({ success: true, config: appConfig });
-});
-
 async function triggerCommit() {
-  const config = appConfig;
+  const config = getConfig();
   if (!config.githubToken || !config.repoOwner || !config.repoName) {
-    lastRunLog = `Failed: Missing GitHub config.`;
+    lastRunLog = `Failed: Missing GitHub config (GITHUB_TOKEN, GITHUB_REPO_OWNER, GITHUB_REPO_NAME) in Environment Variables.`;
     return { success: false, log: lastRunLog };
   }
   try {
     const octokit = new Octokit({ auth: config.githubToken });
-    const timestamp = new Date().toISOString();
-    const contentToPush = Buffer.from(`Automated update triggered at: ${timestamp}`).toString("base64");
 
-    // 1. Verify Repository and Branch
-    await octokit.rest.repos.get({ owner: config.repoOwner, repo: config.repoName });
-    await octokit.rest.repos.getBranch({ owner: config.repoOwner, repo: config.repoName, branch: config.branch });
-
-    // 2. Get File SHA
-    let fileSha: string | undefined;
+    // 1. Verify Repository and Branch first for better error messages
     try {
-      const response = await octokit.rest.repos.getContent({
+      await octokit.rest.repos.get({
         owner: config.repoOwner,
         repo: config.repoName,
-        path: config.filePath,
-        ref: config.branch,
       });
-      if (!Array.isArray(response.data) && response.data.type === 'file') {
-         fileSha = response.data.sha;
+
+      try {
+        await octokit.rest.repos.getBranch({
+          owner: config.repoOwner,
+          repo: config.repoName,
+          branch: config.branch,
+        });
+      } catch (branchError: any) {
+        if (branchError.status === 404) {
+          throw new Error(`Branch "${config.branch}" not found in repository "${config.repoOwner}/${config.repoName}".`);
+        }
+        throw branchError;
       }
-    } catch (error: any) {
-      if (error.status !== 404) throw error;
+    } catch (repoError: any) {
+      if (repoError.status === 404) {
+        throw new Error(`Repository "${config.repoOwner}/${config.repoName}" not found.`);
+      }
+      throw repoError;
     }
 
-    // 3. Update File
-    await octokit.rest.repos.createOrUpdateFileContents({
-      owner: config.repoOwner,
-      repo: config.repoName,
-      path: config.filePath,
-      message: `Automated cron commit [skip ci] - ${timestamp}`,
-      content: contentToPush,
-      sha: fileSha,
-      branch: config.branch,
-    });
+    let successCount = 0;
+    const iterations = Math.max(1, Math.min(config.commitCount, 20)); // Limit to 20 for safety
 
-    lastRunLog = `Success! Committed to ${config.repoOwner}/${config.repoName} at ${timestamp}`;
+    for (let i = 0; i < iterations; i++) {
+        const timestamp = new Date().toISOString();
+        const contentToPush = Buffer.from(`Automated update ${i+1}/${iterations} triggered at: ${timestamp}`).toString("base64");
+
+        // Get the current file's SHA if it exists (needs to be updated before each commit)
+        let fileSha: string | undefined;
+        try {
+          const response = await octokit.rest.repos.getContent({
+            owner: config.repoOwner,
+            repo: config.repoName,
+            path: config.filePath,
+            ref: config.branch,
+          });
+          if (!Array.isArray(response.data) && response.data.type === 'file') {
+             fileSha = response.data.sha;
+          }
+        } catch (error: any) {
+          if (error.status !== 404) throw error;
+        }
+
+        // Create or update the file
+        await octokit.rest.repos.createOrUpdateFileContents({
+          owner: config.repoOwner,
+          repo: config.repoName,
+          path: config.filePath,
+          message: `Automated cron commit [skip ci] (${i+1}/${iterations}) - ${timestamp}`,
+          content: contentToPush,
+          sha: fileSha,
+          branch: config.branch,
+        });
+        successCount++;
+        
+        // Brief pause if doing multiple commits to avoid race conditions on SHA retrieval
+        if (iterations > 1 && i < iterations - 1) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+    }
+
+    lastRunLog = `Success! ${successCount} commit(s) pushed to ${config.repoOwner}/${config.repoName} at ${new Date().toISOString()}`;
     return { success: true, log: lastRunLog };
   } catch (error: any) {
     lastRunLog = `Failed at ${new Date().toISOString()}: ${error.message}`;
@@ -165,9 +143,8 @@ async function triggerCommit() {
 
 router.get("/status", requireAdmin, (req: Request, res: Response) => {
    res.json({
-      isRunning: appConfig.isActive,
-      lastRunLog,
-      cronExpression: appConfig.cronExpression
+      isRunning: true, // Serverless crons are handled externally, always ready
+      lastRunLog
    });
 });
 
@@ -180,13 +157,9 @@ router.all("/cron", async (req: Request, res: Response) => {
    const authHeader = req.headers.authorization;
    const vercelCronSecret = process.env.CRON_SECRET;
 
+   // Secure verification (CRON_SECRET is injected globally by Vercel inside cron requests)
    if (vercelCronSecret && authHeader !== `Bearer ${vercelCronSecret}`) {
       res.status(401).json({ error: "Unauthorized vercel cron execution" });
-      return;
-   }
-
-   if (!appConfig.isActive) {
-      res.json({ status: "skipped", reason: "Scheduler is disabled" });
       return;
    }
 
@@ -196,8 +169,5 @@ router.all("/cron", async (req: Request, res: Response) => {
 
 app.use("/api", router);
 app.use("/", router);
-
-// Initialize
-loadConfig().then(() => setupLocalCron());
 
 export default app;
