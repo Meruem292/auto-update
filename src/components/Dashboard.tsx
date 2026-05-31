@@ -284,9 +284,9 @@ export function Dashboard({ token, onLogout }: DashboardProps) {
                         value={config.cronExpression}
                         onChange={e => setConfig({...config, cronExpression: e.target.value})}
                         className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-slate-500 focus:border-slate-500 sm:text-sm font-mono"
-                        placeholder="0 * * * *"
+                        placeholder="0 0 * * *"
                       />
-                      <p className="mt-1 text-xs text-gray-500">Cron format (e.g., "0 * * * *" for hourly). Check <i>crontab.guru</i> for help.</p>
+                      <p className="mt-1 text-xs text-gray-500">Cron format (e.g., "0 0 * * *" for daily). Check <i>crontab.guru</i> for help.</p>
                     </div>
 
                     <div className="flex items-center">

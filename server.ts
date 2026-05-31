@@ -25,7 +25,7 @@ const defaultConfig: AppConfig = {
   filePath: "automated-update.txt",
   branch: "main",
   commitMessage: "Automated cron commit [skip ci]",
-  cronExpression: "0 * * * *",
+  cronExpression: "0 0 * * *",
   isActive: false,
 };
 
