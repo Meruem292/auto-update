@@ -31,8 +31,9 @@ export function Login({ onLogin }: LoginProps) {
       } else {
         setError(data.error || 'Invalid password');
       }
-    } catch (err) {
-      setError('Failed to connect to backend.');
+    } catch (err: any) {
+      console.error("Login fetch error:", err);
+      setError('Failed to connect to backend: ' + err.message);
     } finally {
       setLoading(false);
     }
